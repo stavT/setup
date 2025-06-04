@@ -6,35 +6,44 @@ import threading
 import time
 
 class ProgressBar:
-    """Simple progress bar implementation"""
+    """Simple progress bar implementation with true single-line animation"""
     def __init__(self, total=100, length=40, prefix="Progress"):
         self.total = total
         self.length = length
         self.prefix = prefix
         self.current = 0
         self.running = False
+        self.first_update = True
         
     def update(self, current, message=None):
-        """Update progress bar with current value"""
+        """Update progress bar with current value - true single line animation"""
         if current is not None:
             self.current = min(current, self.total)
         percent = (self.current / self.total) * 100
         filled_length = int(self.length * self.current // self.total)
         bar = '█' * filled_length + '-' * (self.length - filled_length)
         
-        # Build the display string
+        # Build display string
         if message:
-            display = f'{self.prefix}: |{bar}| {percent:.1f}% - {message}'
+            message = message[:30] if len(message) > 30 else message
+            display = f'{self.prefix}: |{bar}| {percent:5.1f}% - {message}'
         else:
-            display = f'{self.prefix}: |{bar}| {percent:.1f}%'
+            display = f'{self.prefix}: |{bar}| {percent:5.1f}%'
         
-        # Pad with spaces to clear any previous longer text, then return to start
-        print(f'\r{display:<80}', end='', flush=True)
+        # Use ANSI escape codes for better compatibility
+        if not self.first_update:
+            # Move cursor to beginning of line and clear it
+            sys.stdout.write('\033[2K\033[1G')
+        else:
+            self.first_update = False
+            
+        sys.stdout.write(display)
+        sys.stdout.flush()
         
     def finish(self):
         """Complete the progress bar"""
         self.update(self.total)
-        print()  # New line after completion
+        print()  # Add newline when finished
 
 class Spinner:
     """Simple spinner for indeterminate progress"""
@@ -275,11 +284,11 @@ def run_ollama_with_progress(command):
                     # Check for errors
                     if any(keyword in line_lower for keyword in ['error', 'failed', 'not found']):
                         progress.finish()
-                        print(f"\n❌ Error: {line}")
+                        print(f"❌ Error: {line}")
                         return False, output_lines
                         
         except KeyboardInterrupt:
-            print(f"\n⚠️ Download interrupted by user")
+            print(f"⚠️ Download interrupted by user")
             process.terminate()
             progress.finish()
             return False, output_lines
@@ -417,7 +426,7 @@ def check_installed(tool_name, tool_type):
                    f"{check_name}:latest" in stdout_lower or
                    f"{check_name}:" in stdout_lower)
         return False
-    
+
     # Python package checking
     elif tool_type == "ספריית פייתון" or tool_type == "חבילת פייתון":
         package_name = tool_name.lower()
@@ -510,7 +519,8 @@ def install_tool(tool_name, tool_type):
         actual_model = model_mappings.get(model_name, model_name)
         print(f"Installing {actual_model} via Ollama...")
         print(f"Note: Large models may take 10-30 minutes to download")
-        success, stdout, stderr = run_ollama_with_progress(f"ollama pull {actual_model}")
+        success, stdout = run_ollama_with_progress(f"ollama pull {actual_model}")
+        stderr = ""  # Ollama progress function doesn't return stderr separately
         
     # Python package installations
     elif tool_type == "ספריית פייתון" or tool_type == "חבילת פייתון":
@@ -567,6 +577,33 @@ def parse_markdown_requirements():
         
     return tools
 
+def get_installation_warning(tool_name, tool_type):
+    """Get warning message for installations that take a long time or are very large"""
+    
+    # Large LLM model warnings
+    if tool_type == "LLM":
+        model_warnings = {
+            "llama3.3": "⚠️  WARNING: llama3.3 is ~8GB and may take 15-30 minutes to download",
+            "phi4": "⚠️  WARNING: phi4 is ~8GB and may take 15-30 minutes to download", 
+            "llama3.2": "⚠️  WARNING: llama3.2 is ~2GB and may take 5-15 minutes to download",
+            "qwen2.5": "⚠️  WARNING: qwen2.5 is ~4GB and may take 10-25 minutes to download",
+            "llava": "⚠️  WARNING: llava is ~4GB and may take 10-25 minutes to download",
+            "mixtral": "⚠️  WARNING: mixtral is ~26GB and may take 45-90 minutes to download",
+            "llava-llama3": "⚠️  WARNING: llava-llama3 is ~8GB and may take 15-30 minutes to download",
+            "llama3.2-vision": "⚠️  WARNING: llama3.2-vision is ~8GB and may take 15-30 minutes to download"
+        }
+        
+        model_name = tool_name.replace("‑", "-").replace("–", "-").lower()
+        return model_warnings.get(model_name, None)
+    
+    # Framework warnings
+    framework_warnings = {
+        "docker": "⚠️  WARNING: Docker Desktop is ~500MB and may take 5-10 minutes to download and install",
+        "anythingllm": "⚠️  WARNING: AnythingLLM is ~200MB and may take 2-5 minutes to download and install"
+    }
+    
+    return framework_warnings.get(tool_name.lower(), None)
+
 def main():
     print("🚀 AI Development Environment Installer")
     print("=" * 50)
@@ -590,6 +627,11 @@ def main():
             print(f"✅ {name} is already installed.")
             continue
 
+        # Show warning for large installations
+        warning = get_installation_warning(name, tool_type)
+        if warning:
+            print(warning)
+            
         # Ask user for installation
         response = input(f"❓ {name} is not installed. Install it? (y/n/all): ").strip().lower()
         
