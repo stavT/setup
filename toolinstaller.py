@@ -2,11 +2,321 @@ import subprocess
 import os
 import sys
 import re
+import threading
+import time
+
+class ProgressBar:
+    """Simple progress bar implementation"""
+    def __init__(self, total=100, length=40, prefix="Progress"):
+        self.total = total
+        self.length = length
+        self.prefix = prefix
+        self.current = 0
+        self.running = False
+        
+    def update(self, current, message=None):
+        """Update progress bar with current value"""
+        if current is not None:
+            self.current = min(current, self.total)
+        percent = (self.current / self.total) * 100
+        filled_length = int(self.length * self.current // self.total)
+        bar = '█' * filled_length + '-' * (self.length - filled_length)
+        
+        # Build the display string
+        if message:
+            display = f'{self.prefix}: |{bar}| {percent:.1f}% - {message}'
+        else:
+            display = f'{self.prefix}: |{bar}| {percent:.1f}%'
+        
+        # Pad with spaces to clear any previous longer text, then return to start
+        print(f'\r{display:<80}', end='', flush=True)
+        
+    def finish(self):
+        """Complete the progress bar"""
+        self.update(self.total)
+        print()  # New line after completion
+
+class Spinner:
+    """Simple spinner for indeterminate progress"""
+    def __init__(self, message="Installing"):
+        self.message = message
+        self.running = False
+        self.thread = None
+        self.chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.index = 0
+        
+    def _spin(self):
+        """Internal spinning method"""
+        while self.running:
+            print(f'\r{self.message} {self.chars[self.index]}', end='', flush=True)
+            self.index = (self.index + 1) % len(self.chars)
+            time.sleep(0.1)
+            
+    def start(self):
+        """Start the spinner"""
+        self.running = True
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.daemon = True
+        self.thread.start()
+        
+    def stop(self, final_message=None):
+        """Stop the spinner"""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        if final_message:
+            print(f'\r{final_message}' + ' ' * 20)
+        else:
+            print('\r' + ' ' * 50 + '\r', end='')
+
+def run_command_with_progress(command, message="Installing", capture_output=True, shell=True):
+    """Run a command with progress indication"""
+    
+    # Try to detect if we can show real progress
+    if "pip install" in command:
+        return run_pip_with_progress(command)
+    elif "winget install" in command:
+        return run_winget_with_progress(command)
+    elif "docker run" in command or "docker pull" in command:
+        return run_docker_with_progress(command)
+    elif "ollama pull" in command or "ollama run" in command:
+        return run_ollama_with_progress(command)
+    else:
+        return run_command_with_spinner(command, message)
+
+def run_pip_with_progress(command):
+    """Run pip command with progress tracking"""
+    try:
+        print(f"📦 {command}")
+        process = subprocess.Popen(
+            command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True, 
+            shell=True,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        progress = ProgressBar(prefix="Installing package")
+        output_lines = []
+        
+        for line in iter(process.stdout.readline, ''):
+            output_lines.append(line)
+            line_lower = line.lower()
+            
+            # Look for download progress
+            if "downloading" in line_lower and "%" in line:
+                try:
+                    # Extract percentage from pip output
+                    percent_match = re.search(r'(\d+)%', line)
+                    if percent_match:
+                        percent = int(percent_match.group(1))
+                        progress.update(percent)
+                except:
+                    pass
+            elif "installing" in line_lower:
+                progress.update(80)
+            elif "successfully installed" in line_lower:
+                progress.update(100)
+                
+        process.wait()
+        progress.finish()
+        
+        return process.returncode == 0, ''.join(output_lines), ""
+        
+    except Exception as e:
+        return False, "", str(e)
+
+def run_winget_with_progress(command):
+    """Run winget command with progress tracking"""
+    try:
+        print(f"📦 {command}")
+        process = subprocess.Popen(
+            command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True, 
+            shell=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        progress = ProgressBar(prefix="Installing application")
+        output_lines = []
+        
+        for line in iter(process.stdout.readline, ''):
+            output_lines.append(line)
+            line_lower = line.lower()
+            
+            if "downloading" in line_lower:
+                progress.update(25)
+            elif "installing" in line_lower:
+                progress.update(60)
+            elif "successfully installed" in line_lower:
+                progress.update(100)
+                
+        process.wait()
+        progress.finish()
+        
+        return process.returncode == 0, ''.join(output_lines), ""
+        
+    except Exception as e:
+        return False, "", str(e)
+
+def run_docker_with_progress(command):
+    """Run docker command with progress tracking"""
+    try:
+        print(f"🐳 {command}")
+        process = subprocess.Popen(
+            command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True, 
+            shell=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        progress = ProgressBar(prefix="Docker operation")
+        output_lines = []
+        layers_total = 0
+        layers_complete = 0
+        
+        for line in iter(process.stdout.readline, ''):
+            output_lines.append(line)
+            
+            # Track docker layer progress
+            if "Pull complete" in line:
+                layers_complete += 1
+                if layers_total > 0:
+                    percent = (layers_complete / layers_total) * 100
+                    progress.update(percent)
+            elif "Pulling from" in line:
+                progress.update(10)
+            elif re.search(r'[a-f0-9]{12}:', line):
+                layers_total += 1
+                
+        process.wait()
+        progress.finish()
+        
+        return process.returncode == 0, ''.join(output_lines), ""
+        
+    except Exception as e:
+        return False, "", str(e)
+
+def run_ollama_with_progress(command):
+    """Run ollama command with progress tracking"""
+    try:
+        print(f"🤖 {command}")
+        print("📥 Starting Ollama model download (this may take several minutes for large models)...")
+        
+        process = subprocess.Popen(
+            command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True, 
+            shell=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        progress = ProgressBar(prefix="Downloading model")
+        output_lines = []
+        last_update_time = time.time()
+        download_started = False
+        
+        try:
+            for line in iter(process.stdout.readline, ''):
+                if not line:  # Empty line means end of output
+                    break
+                    
+                line = line.strip()
+                if line:
+                    output_lines.append(line)
+                    line_lower = line.lower()
+                    current_time = time.time()
+                    
+                    # Check for download progress indicators
+                    if any(keyword in line_lower for keyword in ['pulling', 'downloading', 'digest:', 'status:']):
+                        download_started = True
+                        
+                        # Look for percentage information
+                        if '%' in line:
+                            try:
+                                import re
+                                percent_match = re.search(r'(\d+)%', line)
+                                if percent_match:
+                                    percent = int(percent_match.group(1))
+                                    progress.update(percent, f"Downloading: {percent}%")
+                                    last_update_time = current_time
+                                    continue
+                            except:
+                                pass
+                        
+                        # Look for size information (MB/GB)
+                        if any(unit in line_lower for unit in ['mb', 'gb', 'bytes']):
+                            size_info = line.split()[-2:] if len(line.split()) >= 2 else ['', '']
+                            progress.update(None, f"Downloading: {' '.join(size_info)}")
+                            last_update_time = current_time
+                            continue
+                    
+                    # Show periodic updates even without specific progress
+                    if download_started and current_time - last_update_time > 10:  # Update every 10 seconds
+                        progress.update(None, "Downloading... (large model, please wait)")
+                        last_update_time = current_time
+                    
+                    # Check for completion
+                    if any(keyword in line_lower for keyword in ['success', 'complete', 'finished']):
+                        progress.update(100, "Download complete!")
+                        break
+                        
+                    # Check for errors
+                    if any(keyword in line_lower for keyword in ['error', 'failed', 'not found']):
+                        progress.finish()
+                        print(f"\n❌ Error: {line}")
+                        return False, output_lines
+                        
+        except KeyboardInterrupt:
+            print(f"\n⚠️ Download interrupted by user")
+            process.terminate()
+            progress.finish()
+            return False, output_lines
+        
+        # Wait for process to complete
+        return_code = process.wait()
+        progress.finish()
+        
+        if return_code == 0:
+            print("✅ Ollama model download completed successfully!")
+            return True, output_lines
+        else:
+            print(f"❌ Ollama command failed with return code {return_code}")
+            return False, output_lines
+            
+    except Exception as e:
+        print(f"❌ Error running Ollama command: {e}")
+        return False, []
+
+def run_command_with_spinner(command, message="Processing"):
+    """Run command with spinner for indeterminate progress"""
+    spinner = Spinner(message)
+    spinner.start()
+    
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, shell=True, encoding='utf-8', errors='ignore')
+        success = result.returncode == 0
+        spinner.stop(f"✅ {message} completed!" if success else f"❌ {message} failed!")
+        return success, result.stdout, result.stderr
+    except Exception as e:
+        spinner.stop(f"❌ {message} failed!")
+        return False, "", str(e)
 
 def run_command(command, capture_output=True, shell=True):
     """Run a command and return result"""
     try:
-        result = subprocess.run(command, capture_output=capture_output, text=True, shell=shell)
+        result = subprocess.run(command, capture_output=capture_output, text=True, shell=shell, encoding='utf-8', errors='ignore')
         return result.returncode == 0, result.stdout, result.stderr
     except Exception as e:
         return False, "", str(e)
@@ -36,21 +346,76 @@ def check_installed(tool_name, tool_type):
         success, stdout, _ = run_command("n8n --version")
         if not success:
             success, stdout, _ = run_command("npm list -g n8n")
+            if not success:
+                # Check if running as docker container
+                success, stdout, _ = run_command("docker ps --filter name=n8n")
+                return success and "n8n" in stdout
         return success
         
     elif tool_name.lower() == "langflow":
-        success, stdout, _ = run_command("langflow --version")
-        if not success:
-            success, stdout, _ = run_command("python -c \"import langflow; print('installed')\"")
-        return success
+        # Check if Docker is available first
+        docker_available, _, _ = run_command("docker --version")
+        if not docker_available:
+            return False
+            
+        # Check for running Langflow containers (by name first, then by image)
+        success, stdout, _ = run_command("docker ps --filter name=langflow")
+        if success and "langflow" in stdout:
+            return True
+            
+        # Check for running containers by image name
+        success, stdout, _ = run_command("docker ps")
+        if success and "langflowai/langflow" in stdout:
+            return True
+            
+        # Also check for stopped containers (might just need to be restarted)
+        success, stdout, _ = run_command("docker ps -a --filter name=langflow")
+        if success and "langflow" in stdout:
+            return True
+            
+        # Final check for any langflow containers by image
+        success, stdout, _ = run_command("docker ps -a")
+        return success and "langflowai/langflow" in stdout
     
     # LLM Model checking (Ollama models)
     elif tool_type == "LLM":
         success, stdout, _ = run_command("ollama list")
         if success:
             # Clean up model name for checking
-            model_name = tool_name.replace("‑", "-").replace("–", "-")
-            return model_name.lower() in stdout.lower()
+            model_name = tool_name.replace("‑", "-").replace("–", "-").lower()
+            
+            # Handle special model name mappings
+            model_mappings = {
+                "llama3.3": "llama3.3",
+                "phi4": "phi4", 
+                "llama3.2": "llama3.2",
+                "qwen2.5": "qwen2.5",
+                "llava": "llava",
+                "gemma3": "gemma2",  # Ollama uses gemma2 not gemma3
+                "llama3.2-vision": "llama3.2-vision",
+                "mixtral": "mixtral",
+                "llava-llama3": "llava-llama3",
+                "mistral": "mistral",
+                "nomic-embed-text": "nomic-embed-text",
+                "microsoft/phi-3-mini-4k-instruct": "phi3",
+                "mistralai/mistral-7b-instruct-v0.2": "mistral",
+                "meta-llama/llama-3.2-3b-instruct": "llama3.2",
+                "qwen/qwen2.5-7b-instruct": "qwen2.5",
+                "google/gemma-3-1b-it": "gemma2",
+                "llama3.2 vision": "llama3.2-vision",
+                "llava llama3": "llava-llama3",
+                "mixtral 8×7b": "mixtral",
+                "nomic‑embed‑text": "nomic-embed-text"
+            }
+            
+            # Get the actual model name to check
+            check_name = model_mappings.get(model_name, model_name)
+            
+            # Check if model exists (with or without :latest suffix)
+            stdout_lower = stdout.lower()
+            return (check_name in stdout_lower or 
+                   f"{check_name}:latest" in stdout_lower or
+                   f"{check_name}:" in stdout_lower)
         return False
     
     # Python package checking
@@ -77,42 +442,75 @@ def install_tool(tool_name, tool_type):
     # Framework installations
     if tool_name.lower() == "ollama":
         print("Installing Ollama via winget...")
-        success, stdout, stderr = run_command("winget install Ollama.Ollama")
+        success, stdout, stderr = run_winget_with_progress("winget install Ollama.Ollama")
         if not success:
             print("Trying direct download...")
-            success, stdout, stderr = run_command("curl -L https://ollama.com/download/OllamaSetup.exe -o OllamaSetup.exe && start OllamaSetup.exe")
+            success, stdout, stderr = run_command_with_spinner("curl -L https://ollama.com/download/OllamaSetup.exe -o OllamaSetup.exe && start OllamaSetup.exe", "Downloading Ollama")
         
     elif tool_name.lower() == "docker":
         print("Installing Docker Desktop via winget...")
-        success, stdout, stderr = run_command("winget install Docker.DockerDesktop")
+        success, stdout, stderr = run_winget_with_progress("winget install Docker.DockerDesktop")
         
     elif "open webui" in tool_name.lower():
         print("Installing Open WebUI via Docker...")
-        success, stdout, stderr = run_command("docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main")
+        success, stdout, stderr = run_docker_with_progress("docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main")
         
     elif tool_name.lower() == "anythingllm":
         print("Installing AnythingLLM via winget...")
-        success, stdout, stderr = run_command("winget install Mintplex-Labs.AnythingLLM")
+        success, stdout, stderr = run_winget_with_progress("winget install Mintplex-Labs.AnythingLLM")
         if not success:
             print("Please download manually from: https://anythingllm.com/desktop")
             return True  # Manual installation
             
     elif tool_name.lower() == "n8n":
         print("Installing n8n via npm...")
-        success, stdout, stderr = run_command("npm install -g n8n")
+        success, stdout, stderr = run_command_with_spinner("npm install -g n8n", "Installing n8n")
         if not success:
             print("Installing n8n via Docker...")
-            success, stdout, stderr = run_command("docker run -d -p 5678:5678 --name n8n n8nio/n8n")
+            success, stdout, stderr = run_docker_with_progress("docker run -d -p 5678:5678 --name n8n n8nio/n8n")
         
     elif tool_name.lower() == "langflow":
-        print("Installing Langflow via pip...")
-        success, stdout, stderr = run_command("pip install langflow")
+        print("Installing Langflow via Docker...")
+        # First check if a langflow container already exists (stopped)
+        existing_check, stdout, _ = run_command("docker ps -a --filter name=langflow")
+        if "langflow" in stdout:
+            print("Existing Langflow container found. Starting it...")
+            success, stdout, stderr = run_command_with_spinner("docker start langflow", "Starting Langflow")
+        else:
+            success, stdout, stderr = run_docker_with_progress("docker run -d -p 7860:7860 --name langflow --restart unless-stopped langflowai/langflow:latest")
         
     # LLM Model installations
     elif tool_type == "LLM":
-        model_name = tool_name.replace("‑", "-").replace("–", "-")
-        print(f"Installing {model_name} via Ollama...")
-        success, stdout, stderr = run_command(f"ollama pull {model_name}")
+        model_name = tool_name.replace("‑", "-").replace("–", "-").lower()
+        
+        # Handle special model name mappings for installation
+        model_mappings = {
+            "llama3.3": "llama3.3",
+            "phi4": "phi4", 
+            "llama3.2": "llama3.2",
+            "qwen2.5": "qwen2.5",
+            "llava": "llava",
+            "gemma3": "gemma2",  # Ollama uses gemma2 not gemma3
+            "llama3.2-vision": "llama3.2-vision",
+            "mixtral": "mixtral",
+            "llava-llama3": "llava-llama3",
+            "mistral": "mistral",
+            "nomic-embed-text": "nomic-embed-text",
+            "microsoft/phi-3-mini-4k-instruct": "phi3",
+            "mistralai/mistral-7b-instruct-v0.2": "mistral",
+            "meta-llama/llama-3.2-3b-instruct": "llama3.2",
+            "qwen/qwen2.5-7b-instruct": "qwen2.5",
+            "google/gemma-3-1b-it": "gemma2",
+            "llama3.2 vision": "llama3.2-vision",
+            "llava llama3": "llava-llama3",
+            "mixtral 8×7b": "mixtral",
+            "nomic‑embed‑text": "nomic-embed-text"
+        }
+        
+        actual_model = model_mappings.get(model_name, model_name)
+        print(f"Installing {actual_model} via Ollama...")
+        print(f"Note: Large models may take 10-30 minutes to download")
+        success, stdout, stderr = run_ollama_with_progress(f"ollama pull {actual_model}")
         
     # Python package installations
     elif tool_type == "ספריית פייתון" or tool_type == "חבילת פייתון":
@@ -125,12 +523,12 @@ def install_tool(tool_name, tool_type):
             package_name = "transformers"
             
         print(f"Installing {package_name} via pip...")
-        success, stdout, stderr = run_command(f"pip install {package_name}")
+        success, stdout, stderr = run_pip_with_progress(f"pip install {package_name}")
         
     else:
         print(f"⚠️  Unknown installation method for {tool_name}")
         return False
-    
+
     if success:
         print(f"✅ Successfully installed {tool_name}")
     else:
@@ -191,7 +589,7 @@ def main():
         if check_installed(name, tool_type):
             print(f"✅ {name} is already installed.")
             continue
-            
+
         # Ask user for installation
         response = input(f"❓ {name} is not installed. Install it? (y/n/all): ").strip().lower()
         
